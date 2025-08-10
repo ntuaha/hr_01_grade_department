@@ -4,41 +4,60 @@
 import json
 import os
 import re
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+import argparse
+from typing import Dict, List, Optional, Tuple, Any
 
 import pandas as pd
 from pandas import ExcelFile, DataFrame
 
 
-DATA_FILES = [
-    "2023.H2.xlsx",
-    "2024.H1.xlsx",
-    "2024.H2.xlsx",
-    "2025.H1.xlsx",
-]
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "data_files": [
+        "2023.H2.xlsx",
+        "2024.H1.xlsx",
+        "2024.H2.xlsx",
+        "2025.H1.xlsx",
+    ],
+    "mother_file": "2025.H1.xlsx",
+    "sheet_name": "總評分",
+    "target_department": "智能技術中心",
+    "output_dir": "2025H1_技術中心",
+    "category_keys": [
+        "1.分析與邏輯思考能力",
+        "2.專業知識",
+        "3.溝通",
+        "4.口頭溝通",
+        "5.團隊合作",
+        "6.合作意願",
+        "7.持續、努力不懈",
+        "8.個人紀律",
+        "9.主動、積極進取",
+        "10.成熟度",
+        "11.領導能力、潛力",
+        "12.說到做到",
+        "13.綜合表現",
+    ],
+    # 使用者可選填：額外要帶入 CSV 的欄位名（不影響排名計算）
+    "extra_output_columns": [],
+}
 
-# 部門名稱：以 2025.H1 的唯一值中對應到「技術中心」為準
-TARGET_DEPARTMENT = "智能技術中心"
+CONFIG: Dict[str, Any] = DEFAULT_CONFIG.copy()
 
-OUTPUT_DIR = "2025H1_技術中心"
-
-# 13 指標（以規範化後的欄名為準）
-CATEGORY_KEYS = [
-    "1.分析與邏輯思考能力",
-    "2.專業知識",
-    "3.溝通",
-    "4.口頭溝通",
-    "5.團隊合作",
-    "6.合作意願",
-    "7.持續、努力不懈",
-    "8.個人紀律",
-    "9.主動、積極進取",
-    "10.成熟度",
-    "11.領導能力、潛力",
-    "12.說到做到",
-    "13.綜合表現",
-]
+def load_config(config_path: Optional[str]) -> Dict[str, Any]:
+    cfg = DEFAULT_CONFIG.copy()
+    if config_path and os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    cfg.update(loaded)
+        except Exception:
+            pass
+    # 正規化型別
+    cfg["data_files"] = list(cfg.get("data_files", []))
+    cfg["category_keys"] = list(cfg.get("category_keys", []))
+    cfg["extra_output_columns"] = list(cfg.get("extra_output_columns", []))
+    return cfg
 
 
 def normalize_col(col: str) -> str:
@@ -52,11 +71,12 @@ def normalize_col(col: str) -> str:
     return s
 
 
-def build_column_mapping(df: DataFrame) -> Dict[str, str]:
+def build_column_mapping(df: DataFrame, category_keys: Optional[List[str]] = None) -> Dict[str, str]:
     mapping: Dict[str, str] = {}
     normalized = {normalize_col(c): c for c in df.columns}
     # 必要欄位對應
-    for canonical in ["受評者", "部", "平均"] + CATEGORY_KEYS:
+    keys = category_keys or CONFIG.get("category_keys", DEFAULT_CONFIG["category_keys"])  # type: ignore
+    for canonical in ["受評者", "部", "平均"] + list(keys):
         key = normalize_col(canonical)
         # 有些資料會在 13. 綜合表現 中出現空白，normalize 後即可匹配
         if key in normalized:
@@ -77,16 +97,25 @@ def build_column_mapping(df: DataFrame) -> Dict[str, str]:
     return mapping
 
 
-def load_total_scores(xlsx_path: str) -> DataFrame:
+def load_total_scores(xlsx_path: str, sheet_name_hint: Optional[str] = None) -> DataFrame:
     xf = ExcelFile(xlsx_path)
-    # 優先找「總評分」工作表
+    # 優先用指定工作表名，其次模糊找包含『總評分』
     sheet = None
-    for name in xf.sheet_names:
-        if "總評分" in str(name):
-            sheet = name
-            break
+    if sheet_name_hint:
+        for name in xf.sheet_names:
+            if str(name).strip() == str(sheet_name_hint).strip():
+                sheet = name
+                break
     if sheet is None:
-        raise RuntimeError(f"檔案 {xlsx_path} 找不到『總評分』工作表")
+        for name in xf.sheet_names:
+            if "總評分" in str(name):
+                sheet = name
+                break
+    if sheet is None and xf.sheet_names:
+        # 退而求其次：第一個工作表
+        sheet = xf.sheet_names[0]
+    if sheet is None:
+        raise RuntimeError(f"檔案 {xlsx_path} 找不到可用的工作表")
     df = xf.parse(sheet)
     return df
 
@@ -133,9 +162,10 @@ def extract_person_row(df_all: DataFrame, col_map: Dict[str, str], person: str) 
     return rows.iloc[0]
 
 
-def row_to_categories(row: pd.Series, col_map: Dict[str, str]) -> Dict[str, Optional[float]]:
+def row_to_categories(row: pd.Series, col_map: Dict[str, str], category_keys: Optional[List[str]] = None) -> Dict[str, Optional[float]]:
+    keys = category_keys or CONFIG.get("category_keys", DEFAULT_CONFIG["category_keys"])  # type: ignore
     out: Dict[str, Optional[float]] = {}
-    for key in CATEGORY_KEYS:
+    for key in keys:
         col = col_map.get(key)
         out[key] = float(row[col]) if col and pd.notna(row[col]) else None
     return out
@@ -150,16 +180,16 @@ def safe_float(v: Optional[float]) -> Optional[float]:
         return None
 
 
-def gather_dept_category_averages_2025h1() -> Dict[str, Dict[str, Optional[float]]]:
+def gather_dept_category_averages_for_year(file_path: str, category_keys: List[str], sheet_name_hint: Optional[str]) -> Dict[str, Dict[str, Optional[float]]]:
     # 計算 2025.H1 各部門與全體的各項指標與平均的平均值
-    df = load_total_scores("2025.H1.xlsx")
+    df = load_total_scores(file_path, sheet_name_hint)
     col_map = build_column_mapping(df)
     dept_col = col_map.get("部")
     person_col = col_map.get("受評者")
     avg_col = col_map.get("平均")
     if dept_col is None or person_col is None:
         return {}
-    categories = CATEGORY_KEYS + (["平均"] if avg_col else [])
+    categories = category_keys + (["平均"] if avg_col else [])
 
     out: Dict[str, Dict[str, Optional[float]]] = {}
     # 全體
@@ -178,13 +208,13 @@ def gather_dept_category_averages_2025h1() -> Dict[str, Dict[str, Optional[float
     return out
 
 
-def gather_dept_category_averages_for_df(df: DataFrame) -> Dict[str, Dict[str, Optional[float]]]:
+def gather_dept_category_averages_for_df(df: DataFrame, category_keys: List[str]) -> Dict[str, Dict[str, Optional[float]]]:
     col_map = build_column_mapping(df)
     dept_col = col_map.get("部")
     avg_col = col_map.get("平均")
     if dept_col is None:
         return {}
-    categories = CATEGORY_KEYS + (["平均"] if avg_col else [])
+    categories = category_keys + (["平均"] if avg_col else [])
 
     out: Dict[str, Dict[str, Optional[float]]] = {}
     # 全體
@@ -235,26 +265,132 @@ def get_response_counts_2025(df_2025: DataFrame, person: str) -> Dict[str, Optio
     }
 
 
-def main() -> None:
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def cmd_validate(cfg: Dict[str, Any]) -> None:
+    """檢核檔案是否存在、可讀、含有必要欄位與可用工作表。輸出 JSON。"""
+    results: List[Dict[str, Any]] = []
+    for path in cfg["data_files"]:
+        item: Dict[str, Any] = {"file": path, "exists": os.path.exists(path)}
+        if not item["exists"]:
+            item.update({"ok": False, "reason": "file_not_found"})
+            results.append(item)
+            continue
+        try:
+            df = load_total_scores(path, cfg.get("sheet_name"))
+            col_map = build_column_mapping(df)
+            required = ["受評者", "部", "平均"] + list(cfg["category_keys"])[:]
+            missing = [c for c in required if (col_map.get(c) is None)]
+            depts = []
+            if col_map.get("部"):
+                try:
+                    depts = sorted([str(v) for v in df[col_map["部"]].dropna().unique().tolist()])
+                except Exception:
+                    depts = []
+            item.update({
+                "ok": len(missing) == 0,
+                "missing": missing,
+                "departments": depts,
+                "sheet_used": cfg.get("sheet_name"),
+            })
+        except Exception as e:
+            item.update({"ok": False, "reason": "parse_error", "error": str(e)})
+        results.append(item)
+    print(json.dumps({"results": results}, ensure_ascii=False))
 
-    # 讀 2025.H1 作為名單來源
-    df_2025 = load_total_scores("2025.H1.xlsx")
-    df_2025_dept = filter_department(df_2025, TARGET_DEPARTMENT)
-    people = get_people_2025h1(df_2025_dept)
+
+def cmd_preview(cfg: Dict[str, Any]) -> None:
+    """提供可選部門、母體名單前幾位、欄位清單（含可勾選），並反映已選設定。輸出 JSON。"""
+    payload: Dict[str, Any] = {}
+    mother_file = cfg.get("mother_file")
+    selected_depts: List[str] = list(cfg.get("selected_departments", []))
+    try:
+        df = load_total_scores(mother_file, cfg.get("sheet_name"))
+        # 確保傳入預設的 category_keys
+        category_keys_for_mapping = cfg.get("category_keys") or DEFAULT_CONFIG["category_keys"]
+        col_map = build_column_mapping(df, category_keys_for_mapping)
+        dept_col = col_map.get("部")
+        person_col = col_map.get("受評者")
+        avg_col = col_map.get("平均")
+
+        all_depts: List[str] = []
+        if dept_col:
+            try:
+                all_depts = sorted([str(v) for v in df[dept_col].dropna().unique().tolist()])
+            except Exception:
+                all_depts = []
+
+        # 依已選部門過濾樣本名單
+        names: List[str] = []
+        try:
+            df_names = df
+            if dept_col and selected_depts:
+                df_names = df[df[dept_col].isin(selected_depts)]
+            if person_col:
+                names = (
+                    df_names[person_col].dropna().astype(str).str.strip().unique().tolist()
+                )
+        except Exception:
+            names = []
+
+        # 從母體檔推導可用指標（含平均）
+        available_keys: List[str] = []
+        # 使用與 mapping 相同的指標清單檢查
+        for k in category_keys_for_mapping:
+            if col_map.get(k):
+                available_keys.append(k)
+
+        # 確保有預設的選擇欄位
+        current_selected = cfg.get("selected_category_keys") or []
+        default_selected = current_selected if current_selected else available_keys
+
+        payload = {
+            "mother_file": mother_file,
+            "files": list(cfg.get("data_files", [])),
+            "selected_files": list(cfg.get("selected_files") or cfg.get("data_files") or []),
+            "departments": all_depts,
+            "selected_departments": selected_depts,
+            "sample_people": names[:20],
+            "available_category_keys": available_keys,
+            "selected_category_keys": default_selected,
+            "target_department": cfg.get("target_department"),
+            "output_dir": cfg.get("output_dir"),
+            "sheet_name": cfg.get("sheet_name"),
+        }
+    except Exception as e:
+        payload = {"error": str(e)}
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def cmd_run(cfg: Dict[str, Any]) -> None:
+    data_files: List[str] = list(cfg.get("selected_files") or cfg.get("data_files") or [])
+    if not data_files:
+        data_files = DEFAULT_CONFIG["data_files"]
+    target_department: str = cfg.get("target_department", DEFAULT_CONFIG["target_department"])  # type: ignore
+    output_dir: str = cfg.get("output_dir", DEFAULT_CONFIG["output_dir"])  # type: ignore
+    # 確保有選擇的欄位，如果都為空則使用預設
+    selected_keys = cfg.get("selected_category_keys") or []
+    fallback_keys = cfg.get("category_keys") or DEFAULT_CONFIG["category_keys"]
+    category_keys: List[str] = list(selected_keys if selected_keys else fallback_keys)  # type: ignore
+    sheet_name_hint: Optional[str] = cfg.get("sheet_name")
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 讀母體檔作為名單來源
+    df_mother = load_total_scores(cfg.get("mother_file"), sheet_name_hint)
+    df_mother_dept = filter_department(df_mother, target_department)
+    people = get_people_2025h1(df_mother_dept)
 
     # 預先把所有年份的 df 與欄位對應抓好
     year_to_df_all: Dict[str, DataFrame] = {}
     year_to_colmap: Dict[str, Dict[str, str]] = {}
     year_to_dept_means: Dict[str, Dict[str, Dict[str, Optional[float]]]] = {}
-    for fname in DATA_FILES:
+    for fname in data_files:
         if not os.path.exists(fname):
             continue
-        df = load_total_scores(fname)
+        df = load_total_scores(fname, sheet_name_hint)
         year = os.path.splitext(os.path.basename(fname))[0]
         year_to_df_all[year] = df
         year_to_colmap[year] = build_column_mapping(df)
-        year_to_dept_means[year] = gather_dept_category_averages_for_df(df)
+        year_to_dept_means[year] = gather_dept_category_averages_for_df(df, category_keys)
 
     # 為各年份、各欄位計算排名資料表（全體，不限部門）
     year_to_rankings: Dict[str, Dict[str, DataFrame]] = {}
@@ -267,14 +403,14 @@ def main() -> None:
         rankers: Dict[str, DataFrame] = {}
         if avg_col:
             rankers["平均"] = compute_rank_table(df_all, person_col, avg_col)
-        for cat in CATEGORY_KEYS:
+        for cat in category_keys:
             ccol = col_map.get(cat)
             if ccol:
                 rankers[cat] = compute_rank_table(df_all, person_col, ccol)
         year_to_rankings[year] = rankers
 
     # 逐人輸出 CSV 與 HTML
-    dept_avgs_2025 = gather_dept_category_averages_2025h1()
+    dept_avgs_2025 = gather_dept_category_averages_for_year(cfg.get("mother_file"), category_keys, sheet_name_hint)
 
     index_entries: List[Dict[str, object]] = []
 
@@ -296,11 +432,11 @@ def main() -> None:
             rank_val: Optional[int] = None  # 名次（1 為最佳）
             rank_score: Optional[int] = None  # 排名分數（數值越高越好）
             pct_val: Optional[float] = None  # 百分比（數值越高越好）
-            categories: Dict[str, Optional[float]] = {k: None for k in CATEGORY_KEYS}
-            cat_rank: Dict[str, Optional[int]] = {k: None for k in CATEGORY_KEYS}
-            cat_rank_score: Dict[str, Optional[int]] = {k: None for k in CATEGORY_KEYS}
-            cat_pct: Dict[str, Optional[float]] = {k: None for k in CATEGORY_KEYS}
-            group_rank: Dict[str, Optional[int]] = {k: None for k in ["平均"] + CATEGORY_KEYS}
+            categories: Dict[str, Optional[float]] = {k: None for k in category_keys}
+            cat_rank: Dict[str, Optional[int]] = {k: None for k in category_keys}
+            cat_rank_score: Dict[str, Optional[int]] = {k: None for k in category_keys}
+            cat_pct: Dict[str, Optional[float]] = {k: None for k in category_keys}
+            group_rank: Dict[str, Optional[int]] = {k: None for k in ["平均"] + category_keys}
             n_all: Optional[int] = None
             n_group: Optional[int] = None
 
@@ -324,7 +460,7 @@ def main() -> None:
                         except Exception:
                             n_all = None
 
-                for cat in CATEGORY_KEYS:
+                for cat in category_keys:
                     tbl = rankers.get(cat)
                     if tbl is None or person_col not in tbl.columns:
                         continue
@@ -356,7 +492,7 @@ def main() -> None:
                             except Exception:
                                 n_group = None
                         # 各指標
-                        for cat in CATEGORY_KEYS:
+                        for cat in category_keys:
                             ccol = col_map.get(cat)
                             if ccol:
                                 grc = compute_rank_table(dept_df, person_col, ccol)
@@ -374,14 +510,14 @@ def main() -> None:
                 "全體人數": n_all,
                 "組內人數": n_group,
             }
-            for k in CATEGORY_KEYS:
+            for k in category_keys:
                 row[k] = categories.get(k)
                 row[f"{k}_名次"] = cat_rank.get(k)
                 row[f"{k}_排名分數"] = cat_rank_score.get(k)
                 row[f"{k}_排名百分比"] = cat_pct.get(k)
             # 組內排名
             row["平均_組內名次"] = group_rank.get("平均")
-            for k in CATEGORY_KEYS:
+            for k in category_keys:
                 row[f"{k}_組內名次"] = group_rank.get(k)
             rows.append(row)
 
@@ -392,13 +528,13 @@ def main() -> None:
             radar_series.append(
                 {
                     "year": year,
-                    "categories": {k: categories.get(k) for k in CATEGORY_KEYS},
+                    "categories": {k: categories.get(k) for k in category_keys},
                 }
             )
 
         # 排序 rows 依年度
         rows_sorted = sorted(rows, key=lambda x: x["年度"])  # type: ignore
-        csv_path = os.path.join(OUTPUT_DIR, f"{person}.csv")
+        csv_path = os.path.join(output_dir, f"{person}.csv")
         pd.DataFrame(rows_sorted).to_csv(csv_path, index=False)
 
         # 2025.H1 個人各項分數
@@ -406,20 +542,20 @@ def main() -> None:
         row2025 = next((r for r in rows_sorted if r["年度"] == "2025.H1"), None)
         if row2025 is not None:
             person_scores_2025["平均"] = row2025.get("平均")  # type: ignore
-            for k in CATEGORY_KEYS:
+            for k in category_keys:
                 person_scores_2025[k] = row2025.get(k)  # type: ignore
 
         # 2025.H1 問卷回收份數
-        resp_counts = get_response_counts_2025(df_2025, person)
+        resp_counts = get_response_counts_2025(df_mother, person)
 
         # 產出 HTML
-        html_path = os.path.join(OUTPUT_DIR, f"{person}.html")
+        html_path = os.path.join(output_dir, f"{person}.html")
         page_data = {
             "person": person,
-            "department": TARGET_DEPARTMENT,
+            "department": target_department,
             "series": radar_series,
             "tableRows": rows_sorted,
-            "categories": CATEGORY_KEYS,
+            "categories": category_keys,
             "deptCategoryAverages2025H1": dept_avgs_2025,
             "personScores2025H1": person_scores_2025,
             "yearDeptMeans": year_to_dept_means,
@@ -445,17 +581,17 @@ def main() -> None:
         trend = (avg_2025 - avg_prev) if (avg_2025 is not None and avg_prev is not None) else None
 
         all_mean_2025 = dept_avgs_2025.get("ALL", {}).get("平均")
-        dept_mean_2025 = dept_avgs_2025.get(TARGET_DEPARTMENT, {}).get("平均")
+        dept_mean_2025 = dept_avgs_2025.get(target_department, {}).get("平均")
         diff_all = (avg_2025 - all_mean_2025) if (avg_2025 is not None and all_mean_2025 is not None) else None
         diff_dept = (avg_2025 - dept_mean_2025) if (avg_2025 is not None and dept_mean_2025 is not None) else None
 
         # 優勢/留意項目（以相對 ALL 與部門平均的平均差作為排序）
         strengths: List[Tuple[str, float]] = []
         weaknesses: List[Tuple[str, float]] = []
-        for cat in CATEGORY_KEYS:
+        for cat in category_keys:
             v = person_scores_2025.get(cat)
             a = dept_avgs_2025.get("ALL", {}).get(cat)
-            d = dept_avgs_2025.get(TARGET_DEPARTMENT, {}).get(cat)
+            d = dept_avgs_2025.get(target_department, {}).get(cat)
             if v is None or (a is None and d is None):
                 continue
             diffs: List[float] = []
@@ -485,7 +621,9 @@ def main() -> None:
             }
         )
 
-    print(f"完成，輸出於 {OUTPUT_DIR}/ 下的 CSV 與 HTML 檔案。")
+    index_html_path = os.path.join(output_dir, "index.html")
+    print(f"完成，輸出於 {output_dir}/ 下的 CSV 與 HTML 檔案。")
+    print(f"INDEX_HTML_PATH:{index_html_path}")
 
     # 產出首頁 index.html
     try:
@@ -495,16 +633,35 @@ def main() -> None:
             autoescape=select_autoescape(["html"]),
         )
         tmpl = env.get_template("index.html")
-        with open(os.path.join(OUTPUT_DIR, "index.html"), "w", encoding="utf-8") as f:
+        with open(os.path.join(output_dir, "index.html"), "w", encoding="utf-8") as f:
             f.write(
                 tmpl.render(
-                    department=TARGET_DEPARTMENT,
+                    department=target_department,
                     entries=index_entries,
-                    categories=CATEGORY_KEYS,
+                    categories=category_keys,
                 )
             )
     except Exception:
         pass
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="技術中心評比分析與報表產生器")
+    parser.add_argument("--config", type=str, default="config.json", help="設定檔路徑（JSON）")
+    parser.add_argument("--validate", action="store_true", help="僅檢核資料檔，輸出 JSON")
+    parser.add_argument("--preview", action="store_true", help="預覽母體檔可用部門與樣本名單，輸出 JSON")
+    args = parser.parse_args()
+
+    global CONFIG
+    CONFIG = load_config(args.config)
+
+    if args.validate:
+        cmd_validate(CONFIG)
+        return
+    if args.preview:
+        cmd_preview(CONFIG)
+        return
+    cmd_run(CONFIG)
 
 
 if __name__ == "__main__":

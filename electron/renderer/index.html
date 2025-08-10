@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>技術中心報表產生器</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", Arial, sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .col { flex: 1 1 360px; min-width: 360px; border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    pre { white-space: pre-wrap; background: #fafafa; border: 1px solid #eee; padding: 8px; max-height: 220px; overflow: auto; }
+    .files-list { max-height: 200px; overflow: auto; border: 1px dashed #999; padding: 8px; }
+    .dropzone { border: 2px dashed #999; padding: 20px; text-align: center; border-radius: 8px; }
+    .btn { padding: 6px 12px; border: 1px solid #999; border-radius: 6px; background: #fff; cursor: pointer; }
+    .btn.primary { background: #0d6efd; color: white; border-color: #0d6efd; }
+    label { display: block; margin: 6px 0; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(240px, 1fr)); gap: 6px 12px; }
+    select, input[type="text"] { width: 100%; padding: 6px; }
+    .list { max-height: 200px; overflow: auto; border: 1px solid #ddd; padding: 8px; border-radius: 6px; }
+    .pill { display: inline-block; padding: 2px 8px; margin: 2px; border: 1px solid #ccc; border-radius: 999px; }
+  </style>
+</head>
+<body>
+  <h1>技術中心報表產生器</h1>
+  <div class="row">
+    <div class="col">
+      <h2>讀取的檔案</h2>
+      <div id="files" class="files-list"></div>
+      <div class="dropzone" id="dropzone">拖拉 .xlsx 到這裡，或 <button type="button" id="pick" class="btn">選擇檔案</button></div>
+      <p>
+        <button id="validate" class="btn">檢核檔案</button>
+        <button id="preview" class="btn">預覽母體/部門/名單</button>
+      </p>
+      <pre id="result"></pre>
+    </div>
+    <div class="col">
+      <h2>參數設定</h2>
+      <div class="grid">
+        <label>母體表（母體檔）<input id="mother_file" type="text" /></label>
+        <label>工作表名稱<input id="sheet_name" type="text" placeholder="預設：總評分" /></label>
+        <label>處理的組別（部門）<select id="department"></select></label>
+        <label>輸出資料夾<input id="output_dir" type="text" /></label>
+      </div>
+      <div>
+        <div>可選欄位（可勾選）：</div>
+        <div id="available_keys" class="list"></div>
+        <div style="margin-top:6px;">已選欄位：</div>
+        <div id="selected_keys" class="list"></div>
+      </div>
+      <label>自訂欄位（逗號分隔；空白則用預設）：<input id="category_keys" type="text" placeholder="例如：1.分析與邏輯思考能力,2.專業知識" /></label>
+      <div style="margin-top:6px;">勾選要列入樣本過濾的部門：</div>
+      <div id="departments" class="list"></div>
+      <p><button type="button" id="save" class="btn">儲存設定</button></p>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <h2>送出</h2>
+      <p>
+        <button type="button" id="run" class="btn primary">產生報表</button>
+      </p>
+      <pre id="log"></pre>
+      <h3>打包檔案教學</h3>
+      <ol>
+        <li>確認 `config.json`、`scripts/build_reports.py` 可正確執行</li>
+        <li>在 `electron/` 執行：`npm run build` 產生安裝檔</li>
+      </ol>
+    </div>
+  </div>
+
+  <script>
+    const $ = (q) => document.querySelector(q)
+    const filesEl = $('#files')
+    const resultEl = $('#result')
+    const logEl = $('#log')
+
+    async function loadConfig() {
+      const cfg = await window.api.readDiskConfig() || {}
+      const defaultCfg = {
+        mother_file: '2025.H1.xlsx',
+        sheet_name: '總評分',
+        target_department: '智能技術中心',
+        output_dir: '2025H1_技術中心',
+        data_files: [],
+      }
+      const merged = { ...defaultCfg, ...cfg }
+      $('#mother_file').value = merged.mother_file
+      $('#sheet_name').value = merged.sheet_name
+      $('#output_dir').value = merged.output_dir
+      setFilesList(merged.data_files || [])
+    }
+
+    function setFilesList(files, selected = []) {
+      filesEl.innerHTML = ''
+      const selectedSet = new Set(selected && selected.length ? selected : files)
+      for (const f of files) {
+        const id = `f_${btoa(f).replace(/=/g,'')}`
+        const row = document.createElement('div')
+        const cb = document.createElement('input')
+        cb.type = 'checkbox'
+        cb.id = id
+        cb.value = f
+        cb.checked = selectedSet.has(f)
+        cb.addEventListener('change', saveSelectedFiles)
+        const label = document.createElement('label')
+        label.setAttribute('for', id)
+        label.textContent = f
+        row.appendChild(cb)
+        row.appendChild(label)
+        filesEl.appendChild(row)
+      }
+    }
+
+    async function refreshDepartments() {
+      const cfg = await window.api.readDiskConfig() || {}
+      const out = await window.api.preview()
+      try {
+        const data = JSON.parse(out)
+        const deptSel = $('#department')
+        deptSel.innerHTML = ''
+        for (const d of (data.departments || [])) {
+          const opt = document.createElement('option')
+          opt.value = d
+          opt.textContent = d
+          deptSel.appendChild(opt)
+        }
+        if (cfg.target_department) {
+          deptSel.value = cfg.target_department
+        }
+        // 部門複選（影響 sample_people）
+        const deptBox = $('#departments')
+        deptBox.innerHTML = ''
+        const selectedDepts = new Set(data.selected_departments || [])
+        for (const d of (data.departments || [])) {
+          const id = `d_${btoa(d).replace(/=/g,'')}`
+          const wrap = document.createElement('label')
+          wrap.className = 'pill'
+          const cb = document.createElement('input')
+          cb.type = 'checkbox'
+          cb.value = d
+          cb.checked = selectedDepts.size ? selectedDepts.has(d) : true
+          cb.addEventListener('change', saveSelectedDepartments)
+          wrap.appendChild(cb)
+          wrap.appendChild(document.createTextNode(' ' + d))
+          deptBox.appendChild(wrap)
+        }
+        // 欄位可勾選
+        const avail = data.available_category_keys || []
+        const selectedKeys = (data.selected_category_keys && data.selected_category_keys.length ? data.selected_category_keys : avail)
+        const availEl = $('#available_keys')
+        const selEl = $('#selected_keys')
+        availEl.innerHTML = avail.map(k => `<label class="pill"><input type="checkbox" class="key-cb" value="${k}" ${selectedKeys.includes(k)?'checked':''}/> ${k}</label>`).join('')
+        selEl.textContent = selectedKeys.join(', ')
+        for (const cb of document.querySelectorAll('.key-cb')) {
+          cb.addEventListener('change', saveSelectedKeys)
+        }
+        resultEl.textContent = JSON.stringify(data, null, 2)
+      } catch (e) {
+        resultEl.textContent = out
+      }
+    }
+
+    $('#pick').addEventListener('click', async () => {
+      const paths = await window.api.openFiles()
+      if (!paths || !paths.length) return
+      const next = await window.api.setFiles(paths)
+      setFilesList(next.data_files || paths, next.selected_files || next.data_files)
+      await refreshDepartments()
+    })
+
+    const dropzone = $('#dropzone')
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.background = '#eef' })
+    dropzone.addEventListener('dragleave', () => { dropzone.style.background = '' })
+    dropzone.addEventListener('drop', async (e) => {
+      e.preventDefault(); dropzone.style.background = ''
+      const files = Array.from(e.dataTransfer.files || []).map(f => f.path)
+      const next = await window.api.setFiles(files)
+      setFilesList(next.data_files || files, next.selected_files || next.data_files)
+      await refreshDepartments()
+    })
+
+    $('#validate').addEventListener('click', async () => {
+      const out = await window.api.validate()
+      try { resultEl.textContent = JSON.stringify(JSON.parse(out), null, 2) } catch { resultEl.textContent = out }
+    })
+
+    $('#preview').addEventListener('click', async () => { await refreshDepartments() })
+
+    $('#save').addEventListener('click', async () => {
+      const rawKeys = $('#category_keys').value.trim()
+      const keys = rawKeys ? rawKeys.split(',').map(s => s.trim()).filter(Boolean) : undefined
+      const cfg = {
+        mother_file: $('#mother_file').value.trim(),
+        sheet_name: $('#sheet_name').value.trim(),
+        target_department: $('#department').value.trim() || '智能技術中心',
+        output_dir: $('#output_dir').value.trim(),
+        ...(keys ? { category_keys: keys } : {}),
+      }
+      const next = await window.api.writeDiskConfig(cfg)
+      resultEl.textContent = '已寫入 config.json 並更新預覽'
+      await refreshDepartments()
+    })
+
+    $('#run').addEventListener('click', async () => {
+      logEl.textContent = '執行中…'
+      const out = await window.api.runGenerate()
+      logEl.textContent = out
+    })
+
+    ;(async function init(){
+      await loadConfig()
+      await refreshDepartments()
+    })()
+
+    async function saveSelectedFiles(){
+      const cfg = await window.api.readDiskConfig() || {}
+      const all = cfg.data_files || []
+      const selected = Array.from(document.querySelectorAll('#files input[type=checkbox]')).filter(x=>x.checked).map(x=>x.value)
+      await window.api.writeDiskConfig({ selected_files: selected.length ? selected : all })
+    }
+
+    async function saveSelectedDepartments(){
+      const selected = Array.from(document.querySelectorAll('#departments input[type=checkbox]')).filter(x=>x.checked).map(x=>x.value)
+      await window.api.writeDiskConfig({ selected_departments: selected })
+      await refreshDepartments()
+    }
+
+    async function saveSelectedKeys(){
+      const selected = Array.from(document.querySelectorAll('.key-cb')).filter(x=>x.checked).map(x=>x.value)
+      await window.api.writeDiskConfig({ selected_category_keys: selected })
+      document.getElementById('selected_keys').textContent = selected.join(', ')
+    }
+  </script>
+</body>
+</html>

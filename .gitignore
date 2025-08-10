@@ -5,6 +5,8 @@ __pycache__/
 # Electron
 electron/node_modules/
 electron/dist/
+electron/package-lock.json
+electron/renderer-dist
 .keep
 
 # Virtual env

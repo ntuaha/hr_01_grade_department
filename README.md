@@ -99,26 +99,58 @@ DATA_FILES = [
 - 顯示目前讀取的檔案（來自 `config.json` 或拖拉加入）
 - 拖拉加入更多檔案，並即時檢核可處理性
 - 勾選母體表（母體檔）與處理的組別（部門）
-- 選擇產出報表欄位（預設採用母體表）
-- 送出執行，並顯示執行狀態
+- 動態勾選檔案、部門、指標欄位
+- 輸出資料夾與部門連動（如：智能應用中心 → `2025.H1_應用`）
+- **即時同步**：任何設定變更會立即保存到 `config.json` 並刷新預覽
+- 送出執行後**自動開啟** `index.html` 報表結果
 
-### 建置與啟動
-（首次）
+### 首次安裝與啟動
 ```bash
+# 1. 安裝 Electron 主程式
 cd electron
 npm install
+
+# 2. 安裝 Vue3 前端（首次需要）
+cd renderer-vue
+npm install
+
+# 3. 建置 Vue3 前端
+npm run build
+
+# 4. 啟動 Electron 介面
+cd ..  # 回到 electron/ 目錄
 npm run start
 ```
 
-### 打包教學
+### 開發流程（如需修改介面）
+```bash
+# 修改 Vue3 前端後，需重新建置
+cd electron/renderer-vue
+npm run build
+
+# 然後重新啟動 Electron
+cd ..
+npm run start
+```
+
+### 打包發布
 ```bash
 cd electron
 npm run build   # 產生安裝包（依 OS 不同而產生對應檔）
 ```
 
-介面會呼叫後端 Python 指令：
-- `python scripts/build_reports.py --validate` 檢核
-- `python scripts/build_reports.py --preview` 預覽
-- `python scripts/build_reports.py` 送出執行
+### 技術架構
+- **主程式**：Electron（`electron/main.js`）
+- **前端介面**：Vue3（`electron/renderer-vue/`）
+- **後端處理**：Python（`scripts/build_reports.py`）
 
-若需讓介面將拖拉的檔案同步到設定，可手動更新根目錄的 `config.json` 之 `data_files` 與 `mother_file` 後再執行。
+介面會自動呼叫後端 Python 指令：
+- `python scripts/build_reports.py --validate` 檢核檔案
+- `python scripts/build_reports.py --preview` 預覽設定
+- `python scripts/build_reports.py` 執行報表生成
+
+### 設定同步機制
+- 所有 UI 參數變更會**即時寫入** `config.json`
+- 每次變更後會自動刷新預覽資料
+- 不需要手動點擊「保存」按鈕
+- 執行報表時使用最新的設定檔案

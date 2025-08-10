@@ -33,3 +33,4 @@ node_modules/
 config.json
 package-lock.json
 2025.H1_*/
+*.zip

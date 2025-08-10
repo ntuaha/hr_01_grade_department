@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ department }} 2025.H1 總覽</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+    h1 { margin-bottom: 12px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(560px, 1fr)); gap: 16px; }
+    .card { border: 1px solid #eee; border-radius: 8px; padding: 12px 14px; }
+    .muted { color: #666; }
+    .pos { color: #16a34a; }
+    .neg { color: #dc2626; }
+    ul { margin: 6px 0 0; padding-left: 18px; }
+    a { color: #2563eb; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>{{ department }} 2025.H1 同仁摘要</h1>
+  <p class="muted">依 2025.H1 的平均分數、與全體/部門平均的差異，並對照上一期變化，給出每人簡要建議。</p>
+
+  <div class="grid">
+    {% for e in entries %}
+    <div class="card">
+      <h3 style="margin:0 0 6px;"><a href="{{ e.name }}.html">{{ e.name }}</a></h3>
+      <div class="muted" style="margin-bottom:6px;">
+        最新平均：{{ '%.3f' % e.avg_2025 if e.avg_2025 is not none else '?' }}
+        {% if e.trend_from_prev is not none %}
+          ｜與上一期差：<span class="{{ 'pos' if e.trend_from_prev>=0 else 'neg' }}">{{ '%+.3f' % e.trend_from_prev }}</span>
+        {% endif %}
+        {% if e.diff_vs_all is not none %}
+          ｜較全體：<span class="{{ 'pos' if e.diff_vs_all>=0 else 'neg' }}">{{ '%+.3f' % e.diff_vs_all }}</span>
+        {% endif %}
+        {% if e.diff_vs_dept is not none %}
+          ｜較部門：<span class="{{ 'pos' if e.diff_vs_dept>=0 else 'neg' }}">{{ '%+.3f' % e.diff_vs_dept }}</span>
+        {% endif %}
+      </div>
+      <div>
+        <div class="muted">優勢（相較 ALL/部門平均）：</div>
+        <ul>
+          {% for (cat, s) in e.strengths %}
+          <li><span class="pos">{{ cat }}</span>：{{ '%+.3f' % s }}</li>
+          {% endfor %}
+          {% if e.strengths|length == 0 %}<li class="muted">（暫無顯著優勢）</li>{% endif %}
+        </ul>
+      </div>
+      <div style="margin-top:6px;">
+        <div class="muted">需留意（相較 ALL/部門平均）：</div>
+        <ul>
+          {% for (cat, s) in e.weaknesses %}
+          <li><span class="neg">{{ cat }}</span>：{{ '%+.3f' % s }}</li>
+          {% endfor %}
+          {% if e.weaknesses|length == 0 %}<li class="muted">（暫無顯著弱項）</li>{% endif %}
+        </ul>
+      </div>
+      <div class="muted" style="margin-top:6px; font-size:12px;">點擊姓名可查看詳細圖表與歷年數據</div>
+    </div>
+    {% endfor %}
+  </div>
+</body>
+</html>
+

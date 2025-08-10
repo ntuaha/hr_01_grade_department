@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{ person }} - 歷年表現報告</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; }
+    h1 { margin-bottom: 4px; }
+    .muted { color: #666; }
+    .container { display: grid; grid-template-columns: 1fr; gap: 24px; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    @media (max-width: 1200px) { .charts { grid-template-columns: 1fr; } }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+    th, td { border-bottom: 1px solid #eee; padding: 6px 8px; text-align: right; }
+    th.sticky { position: sticky; top: 0; background: #fafafa; z-index: 1; }
+    th:first-child, td:first-child { text-align: left; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #f3f4f6; }
+    .legend { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .legend span { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+    .legend i { width:12px; height:12px; display:inline-block; border-radius:2px; }
+    .tooltip { position: absolute; pointer-events: none; background: rgba(0,0,0,0.75); color: #fff; padding: 6px 8px; border-radius: 4px; font-size: 12px; }
+    .controls { display:flex; gap:10px; flex-wrap:wrap; }
+    .controls select, .controls input { font-size: 13px; padding: 4px 6px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+</head>
+<body>
+  <header>
+    <h1>{{ person }}</h1>
+    <div class="muted">{{ department }}｜歷年表現報告</div>
+  </header>
+
+  <div class="container" style="overflow-x:hidden;">
+    <section>
+      <h3>問卷回收份數（2025.H1）</h3>
+      <div class="muted">
+        必填：{{ responses2025['必填份數'] if responses2025 and responses2025['必填份數'] is not none else '?' }}，
+        邀請：{{ responses2025['邀請份數'] if responses2025 and responses2025['邀請份數'] is not none else '?' }}，
+        主動：{{ responses2025['主動份數'] if responses2025 and responses2025['主動份數'] is not none else '?' }}，
+        總份數：{{ responses2025['總份數'] if responses2025 and responses2025['總份數'] is not none else '?' }}
+      </div>
+    </section>
+    <section class="charts">
+      <div>
+        <h3>排名百分比(越高越好)</h3>
+        <svg id="lineChartRank" width="100%" height="320"></svg>
+      </div>
+      <div>
+        <h3>歷年指標（雷達圖，重疊顯示）</h3>
+        <div class="legend" id="radarLegend" style="margin-bottom:8px;"></div>
+        <svg id="radarChart" width="100%" height="380"></svg>
+      </div>
+    </section>
+
+    <section>
+      <h3>2025.H1 各部門對照（13 項，水平條）</h3>
+      <div id="deptBars" style="display:grid; grid-template-columns: 1fr; gap:16px;"></div>
+      <div class="muted" style="margin-top:4px;">顯示 ALL、智能應用中心、智能技術中心、智能系統中心、智能企劃部；紅線為本人分數</div>
+    </section>
+
+    <section>
+      <h3>詳細數據（每年度人數：全體／組內）</h3>
+      <div class="controls">
+        <label><input type="checkbox" id="onlyAvg" /> 只顯示平均</label>
+      </div>
+      <div style="display:grid; grid-template-columns: 1fr; gap:20px;">
+        <div>
+          <h4>分數（越高越好）｜
+            {% for r in tableRows %}
+              <span class="muted">{{ r['年度'] }}：{{ r['全體人數'] if r['全體人數'] is not none else '?' }}/{{ r['組內人數'] if r['組內人數'] is not none else '?' }}</span>{% if not loop.last %}｜{% endif %}
+            {% endfor %}
+          </h4>
+          <table id="tblScore"></table>
+        </div>
+        <div>
+          <h4>排名(越低越好)</h4>
+          <table id="tblRank"></table>
+        </div>
+        <div>
+          <h4>排名百分比（越高越好）</h4>
+          <table id="tblPct"></table>
+        </div>
+        <div>
+          <h4>組內排名(越低越好)</h4>
+          <table id="tblGroup"></table>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+  const SERIES = {{ series | tojson }};
+  const CATEGORIES = {{ categories | tojson }};
+  const TABLE = {{ tableRows | tojson }};
+  const DEPT_MEANS_2025 = {{ deptCategoryAverages2025H1 | tojson }};
+  const PERSON_2025 = {{ personScores2025H1 | tojson }};
+  const YEAR_DEPT_MEANS = {{ yearDeptMeans | tojson }};
+  const HEADCOUNTS = {{ headcounts | tojson }};
+
+  function renderLine() {
+    const svgRank = d3.select('#lineChartRank');
+    const years = TABLE.map(r => r['年度']);
+    const bbox = svgRank.node().getBoundingClientRect();
+    const width = bbox.width; const height = +svgRank.attr('height');
+    svgRank.selectAll('*').remove();
+    const margin = {top: 20, right: 40, bottom: 28, left: 40};
+    const innerW = width - margin.left - margin.right;
+    const innerH = height - margin.top - margin.bottom;
+    const g = svgRank.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+    const x = d3.scalePoint().domain(years).range([0, innerW]).padding(0.5);
+    const yPct = d3.scaleLinear().domain([0, 100]).range([innerH, 0]);
+    const yScore = d3.scaleLinear().domain([1, d3.max(TABLE, r => r['平均_排名分數'] || 1) || 1]).nice().range([innerH, 0]);
+    const pctData = TABLE.filter(r => r['平均_排名百分比'] != null).map(r => ({年: r['年度'], 值: r['平均_排名百分比']}));
+    g.append('path').datum(pctData).attr('fill', 'none').attr('stroke', '#16a34a').attr('stroke-width', 2)
+      .style('stroke-dasharray', '4 3').attr('d', d3.line().x(d => x(d.年)).y(d => yPct(d.值)));
+    g.selectAll('circle.pct').data(pctData).enter().append('circle').attr('class','pct')
+      .attr('cx', d => x(d.年)).attr('cy', d => yPct(d.值)).attr('r', 3).attr('fill', '#16a34a');
+    g.selectAll('text.pct').data(pctData).enter().append('text').attr('class','pct')
+      .attr('x', d => x(d.年)).attr('y', d => yPct(d.值) - 6).attr('text-anchor','middle')
+      .attr('fill', '#16a34a').attr('font-size', 12).text(d => d.值.toFixed(1));
+    g.append('g').attr('transform', `translate(0,${innerH})`).call(d3.axisBottom(x));
+    g.append('g').call(d3.axisLeft(yPct));
+    // 在圖右上角描述人數
+    const last = years[years.length - 1];
+    const info = years.map(y => {
+      const hc = HEADCOUNTS[y] || {};
+      const a = hc.all != null ? hc.all : '?';
+      const gnum = hc.group != null ? hc.group : '?';
+      return `${y}: 全體 ${a}、組內 ${gnum}`;
+    }).join('  ');
+    svgRank.append('text').attr('x', width - 6).attr('y', 14)
+      .attr('text-anchor', 'end').attr('fill', '#6b7280').attr('font-size', 12)
+      .text(info);
+  }
+
+  function renderRadar() {
+    const svg = d3.select('#radarChart');
+    const bbox = svg.node().getBoundingClientRect();
+    const width = bbox.width; const height = +svg.attr('height');
+    svg.selectAll('*').remove();
+    const cx = width / 2, cy = height / 2, r = Math.min(width, height) * 0.35;
+    const levels = 5;
+    const angle = (i) => (Math.PI * 2 * i / CATEGORIES.length) - Math.PI / 2;
+
+    // grid
+    for (let l = 1; l <= levels; l++) {
+      const rr = r * l / levels;
+      const points = CATEGORIES.map((_, i) => [cx + rr * Math.cos(angle(i)), cy + rr * Math.sin(angle(i))]);
+      svg.append('polygon').attr('points', points.map(p => p.join(',')).join(' '))
+        .attr('fill', 'none').attr('stroke', '#e5e7eb');
+    }
+    CATEGORIES.forEach((c, i) => {
+      const ax = cx + (r + 14) * Math.cos(angle(i));
+      const ay = cy + (r + 14) * Math.sin(angle(i));
+      svg.append('text').attr('x', ax).attr('y', ay).attr('text-anchor', 'middle').attr('font-size', 12).text(c);
+    });
+
+    // 歷年重疊顯示，不再需要年/基準選擇
+
+    const colors = d3.schemeTableau10;
+    // 動態圖例（可點擊切換顯示/隱藏該年度）
+    const legend = d3.select('#radarLegend');
+    legend.selectAll('*').remove();
+    const active = new Map(SERIES.map(s => [s.year, true]));
+    SERIES.forEach((s, idx) => {
+      const span = legend.append('span').style('margin-right','12px').style('user-select','none');
+      const swatch = span.append('i').style('background', colors[idx % colors.length]);
+      const label = span.append('b').text(' ' + s.year).style('color', colors[idx % colors.length]);
+      span.on('click', () => {
+        const v = !active.get(s.year);
+        active.set(s.year, v);
+        swatch.style('opacity', v ? 1 : 0.2);
+        label.style('opacity', v ? 1 : 0.5);
+        drawOverlays();
+      });
+    });
+
+    function drawOverlays() {
+      svg.selectAll('g.overlay').remove();
+      const gBase = svg.append('g').attr('class','overlay base');
+      const baseAll = (YEAR_DEPT_MEANS['2025.H1'] || {}).ALL || {};
+      const baseDept = (YEAR_DEPT_MEANS['2025.H1'] || {})['{{ department }}'] || {};
+      const ptsBase = CATEGORIES.map((c, i) => {
+        const v = baseAll[c];
+        const rr = (v == null ? 0 : (v / 5.0) * r);
+        return [cx + rr * Math.cos(angle(i)), cy + rr * Math.sin(angle(i))];
+      });
+      gBase.append('polygon').attr('points', ptsBase.map(p => p.join(',')).join(' '))
+        .attr('fill', 'none').attr('stroke', '#9ca3af').attr('stroke-opacity', 0.6);
+
+      const ptsDept = CATEGORIES.map((c, i) => {
+        const v = baseDept[c];
+        const rr = (v == null ? 0 : (v / 5.0) * r);
+        return [cx + rr * Math.cos(angle(i)), cy + rr * Math.sin(angle(i))];
+      });
+      gBase.append('polygon').attr('points', ptsDept.map(p => p.join(',')).join(' '))
+        .attr('fill', 'none').attr('stroke', '#6b7280').attr('stroke-opacity', 0.6).style('stroke-dasharray','4 3');
+
+      SERIES.forEach((series, idx) => {
+        if (!active.get(series.year)) return;
+        const pts = CATEGORIES.map((c, i) => {
+          const v = series.categories[c];
+          const rr = (v == null ? 0 : (v / 5.0) * r);
+          return [cx + rr * Math.cos(angle(i)), cy + rr * Math.sin(angle(i))];
+        });
+        const gY = svg.append('g').attr('class','overlay year');
+        gY.append('polygon').attr('points', pts.map(p => p.join(',')).join(' '))
+          .attr('fill', colors[idx % colors.length]).attr('fill-opacity', 0.08)
+          .attr('stroke', colors[idx % colors.length]).attr('stroke-opacity', 0.9);
+        gY.selectAll('circle.r'+idx).data(pts).enter().append('circle')
+          .attr('class', 'r'+idx).attr('cx', d => d[0]).attr('cy', d => d[1]).attr('r', 2.5)
+          .attr('fill', colors[idx % colors.length]);
+      });
+    }
+
+    drawOverlays();
+  }
+
+  function renderBar() {
+    const container = d3.select('#deptBars');
+    container.selectAll('*').remove();
+    const departments = ['ALL', '智能應用中心', '智能技術中心', '智能系統中心', '智能企劃部'];
+    const metrics = ['平均', ...CATEGORIES];
+    metrics.forEach(metric => {
+      const wrap = container.append('div');
+      wrap.append('div').text(metric).attr('class','muted').style('margin','2px 0');
+      const svg = wrap.append('svg').attr('width','100%').attr('height', 120);
+      const bbox = svg.node().getBoundingClientRect();
+      const width = bbox.width; const height = +svg.attr('height');
+      const margin = {top: 10, right: 24, bottom: 24, left: 100};
+      const innerW = width - margin.left - margin.right;
+      const innerH = height - margin.top - margin.bottom;
+      const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+      const data = departments.map(d => ({dept:d, value: (DEPT_MEANS_2025[d]||{})[metric]}));
+      const y = d3.scaleBand().domain(departments).range([0, innerH]).padding(0.3);
+      const x = d3.scaleLinear().domain([0, 5]).range([0, innerW]);
+      g.selectAll('rect').data(data).enter().append('rect')
+        .attr('y', d => y(d.dept)).attr('x', 0)
+        .attr('height', y.bandwidth()).attr('width', d => x(d.value || 0))
+        .attr('fill', '#2563eb');
+      // labels
+      g.selectAll('text.val').data(data).enter().append('text').attr('class','val')
+        .attr('x', d => Math.max(x(d.value || 0) + 6, 36)).attr('y', d => y(d.dept) + y.bandwidth()/2 + 4)
+        .text(d => d.value != null ? d.value.toFixed(3) : '')
+        .attr('fill', '#111827').attr('font-size', 12);
+
+      // 個人紅線
+      const p = PERSON_2025[metric];
+      if (p != null) {
+        g.append('line').attr('x1', x(p)).attr('x2', x(p)).attr('y1', 0).attr('y2', innerH)
+          .attr('stroke', '#ef4444').attr('stroke-width', 2).style('stroke-dasharray', '4 3');
+        const labelX = Math.min(x(p) + 6, innerW - 40);
+        g.append('text').attr('x', labelX).attr('y', 1)
+          .attr('fill', '#ef4444').attr('font-size', 12).text(`本人：${p.toFixed(3)}`);
+      }
+
+      // axes
+      g.append('g').call(d3.axisLeft(y));
+      g.append('g').attr('transform', `translate(0,${innerH})`).call(d3.axisBottom(x));
+    });
+  }
+
+  function buildTable(containerSelector, type, onlyAvg) {
+    const table = d3.select(containerSelector);
+    table.selectAll('*').remove();
+    const metrics = onlyAvg ? ['平均'] : ['平均', ...CATEGORIES];
+    // header
+    const thead = table.append('thead');
+    const headRow = thead.append('tr');
+    headRow.append('th').text('年度').attr('class','sticky');
+    metrics.forEach(m => {
+      if (type === 'score') headRow.append('th').text(m);
+      if (type === 'rank') headRow.append('th').text(m + '・名次');
+      if (type === 'pct') headRow.append('th').text(m + '・排名百分比');
+      if (type === 'group') headRow.append('th').text(m + '・組內名次');
+    });
+    const tbody = table.append('tbody');
+    TABLE.forEach(r => {
+      const tr = tbody.append('tr');
+      tr.append('td').style('text-align','left').text(r['年度']);
+      metrics.forEach(m => {
+        if (type === 'score') tr.append('td').text(r[m] != null ? (+r[m]).toFixed(3) : '');
+        if (type === 'rank') tr.append('td').text(r[m + '_名次'] != null ? r[m + '_名次'] : '');
+        if (type === 'pct') tr.append('td').text(r[m + '_排名百分比'] != null ? (r[m + '_排名百分比']).toFixed(1) + '%' : '');
+        if (type === 'group') tr.append('td').text(r[m + '_組內名次'] != null ? r[m + '_組內名次'] : '');
+      });
+    });
+  }
+
+  function renderTables() {
+    const onlyAvg = document.getElementById('onlyAvg').checked;
+    buildTable('#tblScore', 'score', onlyAvg);
+    buildTable('#tblRank', 'rank', onlyAvg);
+    buildTable('#tblPct', 'pct', onlyAvg);
+    buildTable('#tblGroup', 'group', onlyAvg);
+  }
+
+  function rerender() { renderLine(); renderRadar(); renderBar(); renderTables(); }
+  window.addEventListener('resize', rerender);
+  const onlyAvgEl = document.getElementById('onlyAvg');
+  if (onlyAvgEl) { onlyAvgEl.addEventListener('change', () => { renderTables(); }); }
+  rerender();
+  </script>
+</body>
+</html>
+
+

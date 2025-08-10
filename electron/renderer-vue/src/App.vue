@@ -103,14 +103,7 @@
         </div>
 
         <p style="color: #666; font-size: 14px;">💡 設定變更會自動保存並更新預覽</p>
-        <button class="btn" @click="testWrite" style="background: orange; color: white;">測試寫入</button>
       </div>
-    </div>
-
-    <!-- 結果與執行 -->
-    <div class="card">
-      <h2>預覽結果</h2>
-      <div class="result-box">{{ previewText }}</div>
     </div>
 
     <div class="card">
